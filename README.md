@@ -8,13 +8,18 @@ No API keys and no browser: it calls the same JSON endpoints and pages the sites
 | Tool | What it returns |
 |---|---|
 | `bulk_search(items[], per_site=5)` | A whole shopping list at once: top in-stock offers per item from both sites |
-| `search_both(query, …)` | One item, both sites in parallel |
+| `search_both(query, …, with_specs)` | One item, both sites in parallel |
 | `rozetka_search(query, min_price, max_price, sort, page, limit, in_stock_only)` | Title, price, stock status, seller + rating, link |
 | `rozetka_product(product_id)` | Plus seller phone, category, full specs |
-| `prom_search(query, …, wholesale_only)` | Title, price, unit, stock, wholesale prices, seller (region, % positive), link |
-| `prom_product(id_or_url)` | Wholesale tiers (**price per minimum quantity**), seller phones, min order sum |
+| `prom_search(query, …, wholesale_only, with_specs)` | Title, price, unit, stock, wholesale prices, seller (region, % positive), link; with `with_specs=True` also each result's specs |
+| `prom_product(id_or_url)` | Specs, brand, category, description, wholesale tiers (**price per minimum quantity**), seller phones, min order sum |
 
 `sort`: `relevance` (default), `price_asc`, `price_desc` (Rozetka also `popular`, `new`, `rating`).
+`with_specs=True` (Prom only): search pages carry no characteristics, so the server opens
+each result's product page and adds `specs` (seller-filled: capacity, power, ports, color…).
+If a seller filled none, a `description_excerpt` is added instead. It costs one request per
+result, so keep `limit` small (≈5–10).
+
 Stock is a status (в наявності / закінчується / під замовлення), not an exact count;
 confirm bulk quantities with the seller.
 
@@ -43,6 +48,9 @@ Alternatively, start `claude` inside this folder: the included `.mcp.json` regis
 
 > Find офісні крісла up to 4000 UAH on Prom with wholesale prices, then get wholesale
 > tiers and seller phones for the top 5.
+
+> Find a white 10000 mAh MagSafe power bank on Prom with with_specs, limit 8, and keep only
+> those whose specs say 22.5 W and USB-C.
 
 ## Notes
 

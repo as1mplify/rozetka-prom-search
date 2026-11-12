@@ -310,6 +310,7 @@ async def prom_search_impl(
     limit: int = 20,
     in_stock_only: bool = True,
     wholesale_only: bool = False,
+    with_specs: bool = False,
 ) -> dict:
     params: dict[str, Any] = {"search_term": query}
     if page > 1:
@@ -333,6 +334,8 @@ async def prom_search_impl(
     if max_price is not None:
         rows = [x for x in rows if x["price"] is not None and x["price"] <= max_price]
     rows = rows[: max(1, limit)]
+    if with_specs:  # search pages carry no specs: one product-page fetch per row
+        await asyncio.gather(*(_prom_attach_specs(x) for x in rows))
     return {
         "site": "prom",
         "query": query,
@@ -354,7 +357,18 @@ def _walk(o: Any):
             yield from _walk(v)
 
 
-async def prom_product_impl(product: str) -> dict:
+def _prom_specs(p: dict) -> dict[str, str]:
+    """Seller-filled characteristics ("Ємність акумулятору": "10000 мА/год", ...)."""
+    specs: dict[str, str] = {}
+    for a in p.get("attributes") or []:
+        vals = [str(v.get("value")).strip() for v in a.get("values") or [] if v.get("value")]
+        if a.get("name") and vals:
+            specs[a["name"]] = ", ".join(vals)
+    return specs
+
+
+async def _prom_fetch_product(product: str | int) -> tuple[dict | None, dict, str]:
+    """Load a Prom product page; returns (product, apollo_state, final_url)."""
     s = str(product).strip()
     if s.startswith("http"):
         url = s
@@ -369,11 +383,38 @@ async def prom_product_impl(product: str) -> dict:
         d for d in _walk(state)
         if d.get("__typename") == "Product" and (pid is None or d.get("id") == pid)
     ]
-    if not prods:
+    p = max(prods, key=len) if prods else None  # the most complete copy
+    return p, state, str(r.url)
+
+
+def _clip(text: str | None, n: int) -> str | None:
+    text = re.sub(r"[ \t]+", " ", (text or "")).strip()
+    if not text:
+        return None
+    return text if len(text) <= n else text[:n].rstrip() + "…"
+
+
+async def _prom_attach_specs(row: dict) -> None:
+    """Add specs (and a description excerpt if the seller filled no specs) to a search row."""
+    try:
+        p, _, _ = await _prom_fetch_product(row["id"])
+    except Exception as e:
+        row["specs_error"] = f"{type(e).__name__}: {e}"
+        return
+    if not p:
+        row["specs_error"] = "product page not found"
+        return
+    row["specs"] = _prom_specs(p)
+    if not row["specs"]:
+        row["description_excerpt"] = _clip(p.get("descriptionPlain"), 600)
+
+
+async def prom_product_impl(product: str) -> dict:
+    p, state, final_url = await _prom_fetch_product(product)
+    if not p:
         return {"error": f"Prom product not found: {product}"}
-    p = max(prods, key=len)  # the most complete copy
     row = _prom_row(p)
-    row["url"] = str(r.url)
+    row["url"] = final_url
     tiers = []
     for w in p.get("wholesalePrices") or []:
         tiers.append(
@@ -387,6 +428,12 @@ async def prom_product_impl(product: str) -> dict:
     row["orders_count"] = p.get("ordersCount")
     row["min_order_qty"] = _num(p.get("minimumOrderQuantity"))
     row["sku"] = p.get("sku") or None
+    row["brand"] = (p.get("manufacturerInfo") or {}).get("name")
+    row["category"] = (p.get("category") or {}).get("caption") or (p.get("category") or {}).get("name")
+    row["warranty"] = p.get("warranty") or None
+    row["specs"] = _prom_specs(p)
+    # Many sellers put power/ports only in the free-text description.
+    row["description"] = _clip(p.get("descriptionPlain"), 3000)
     comp_id = (p.get("company") or {}).get("id") or p.get("company_id")
     comps = [d for d in _walk(state) if d.get("__typename") == "Company" and d.get("id") == comp_id]
     if comps:
@@ -448,18 +495,23 @@ async def prom_search(
     limit: int = 29,
     in_stock_only: bool = True,
     wholesale_only: bool = False,
+    with_specs: bool = False,
 ) -> dict:
     """Search prom.ua. Returns title, price, unit, stock status, wholesale prices (if any),
-    seller (name, region, rating), link. ~29 items per page; use `page` for more."""
+    seller (name, region, rating), link. ~29 items per page; use `page` for more.
+    with_specs=True also opens each result's page and adds `specs` (seller-filled
+    characteristics, e.g. capacity, power, ports, color); slower, so use a
+    small `limit`. Results with no specs get a `description_excerpt` instead."""
     return await prom_search_impl(
-        query, min_price, max_price, sort, page, limit, in_stock_only, wholesale_only
+        query, min_price, max_price, sort, page, limit, in_stock_only, wholesale_only, with_specs
     )
 
 
 @mcp.tool()
 async def prom_product(product: str) -> dict:
-    """Full Prom product by id or URL: stock, wholesale tiers (price + minimum quantity),
-    seller min order sum and contacts where shown."""
+    """Full Prom product by id or URL: stock, specs (seller-filled characteristics),
+    brand, category, description, wholesale tiers (price + minimum quantity), seller min order sum
+    and contacts where shown."""
     return await prom_product_impl(product)
 
 
@@ -478,11 +530,18 @@ async def search_both(
     sort: Sort = "relevance",
     limit_per_site: int = 15,
     in_stock_only: bool = True,
+    with_specs: bool = False,
 ) -> dict:
-    """Search Rozetka and Prom.ua in parallel for one item."""
+    """Search Rozetka and Prom.ua in parallel for one item.
+    with_specs=True adds `specs` to Prom results (one extra page fetch per result)."""
     rz, pr = await asyncio.gather(
         _safe(rozetka_search_impl(query, min_price, max_price, sort, 1, limit_per_site, in_stock_only)),
-        _safe(prom_search_impl(query, min_price, max_price, sort, 1, limit_per_site, in_stock_only)),
+        _safe(
+            prom_search_impl(
+                query, min_price, max_price, sort, 1, limit_per_site, in_stock_only,
+                with_specs=with_specs,
+            )
+        ),
     )
     return {"query": query, "rozetka": rz, "prom": pr}
 
