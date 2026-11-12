@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "ua-shop": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "run",
+        "--quiet",
+        "--script",
+        "server.py"
+      ],
+      "env": {}
+    }
+  }
+}
